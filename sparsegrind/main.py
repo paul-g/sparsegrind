@@ -219,6 +219,20 @@ def compression_analysis_precision(matrix, name, tolerance):
 
     print
 
+def analyse_bucketing(matrix, name, tolerance):
+    """Change matrix data representation to fix of floating and fix point,
+       loose some precision and check if it is still fine for iterative method"""
+    results = [name]
+    sh = matrix.shape
+    if sh[0] <= 1 or sh[1] <= 1:
+        return
+    results.append('?')
+    results.append(matrix.nnz)
+    results.append(len(matrix.indptr))
+
+    n = len(matrix.indptr)
+
+    precision.split_to_buckets(n, matrix, target_bitwidth=16, tol=1e-8, bucket_size=2, integer_bits = 4)
 
 def plot_matrices(list_of_matrices):
     """Plots the given list of sparse matrices using plt.spy()"""
@@ -290,6 +304,8 @@ def grind_matrix(file, args):
         compression_analysis_bcsrvi(realms[0], name)
     elif args.analysis == 'reduce_precision':
         compression_analysis_precision(realms[0], name, args.tolerance)
+    elif args.analysis == 'bucket':
+        analyse_bucketing(realms[0], name, args.tolerance)
     elif args.analysis == 'summary':
         summary_analysis(realms[0], name)
     else:
@@ -312,6 +328,7 @@ def main():
                                  'reordering',
                                  'compress_bcsrvi',
                                  'reduce_precision',
+                                 'bucket',
                                  'summary'],
                         help='Analysis to run')
     parser.add_argument('-t', '--timestep',
