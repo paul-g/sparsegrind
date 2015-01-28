@@ -23,6 +23,8 @@ double_man_bitwidth = 53
 bytes_per_data = 8
 bytes_per_metadata = 4
 
+verbose = False
+
 def trim_ieee_mantissa(data, target_bitwidth, split_rep=None):
     """
     Here we simply reduce precision of each input entry by representing it in a
@@ -122,34 +124,38 @@ def bucketize(data, bitwidth, tolerance, split_buckets):
     # in the actual encoding, only this part is to be stored
     m_for_common_exp = m * 2.0**exponent_diff
 
-    print "---------------------------"
-    print data, bucket_representative, deltas
-    print (m,exp), (rm, rexp), exponent_diff
-    print "to be stored:", m_for_common_exp
-    print deltas_in_target_bitwidth
-
+    if (verbose):
+        print "---------------------------"
+        print data, bucket_representative, deltas
+        print (m,exp), (rm, rexp), exponent_diff
+        print "to be stored:", m_for_common_exp
+        print deltas_in_target_bitwidth
 
     num_buckets = 1
     # does any correction term require non-zero integer part?
     if (np.any(np.greater_equal(m_for_common_exp, 1))):
-
-        print "bucket entry requires an integer part: ", m_for_common_exp
-        print "cannot fit deltas to +/-{:1d}.{:2d} bit form\n".format(0, bitwidth)
+        if (verbose):
+            print "bucket entry requires an integer part: ", m_for_common_exp
+            print "cannot fit deltas to +/-{:1d}.{:2d} bit form\n".format(0, bitwidth)
 
         # split data into 2 parts starting from violating member
         branching_point = np.argmax(m_for_common_exp >= 1)
         left, right = np.split(data,[branching_point])
         # re-run bucketize on second part (first part is already fine)
-        num, bucket, droplist = bucketize(right, bitwidth, tolerance, split_buckets)
+        right_num_buckets, right_reduced, droplist = bucketize(right, bitwidth, tolerance, split_buckets)
+        # concatenate already processed deltas on the left to bucket(s) on the right
+        new_values = np.where(m_for_common_exp < 1, bucket_representative - deltas_in_target_bitwidth, right_reduced)
+#        new_values_left = bucket_representative - 
+#        new_values = bucket_representative - final_deltas
+        num_buckets += right_num_buckets
 
-        print branching_point, left, right, num, bucket
+        if (verbose):print "end of if", branching_point, left, right, right_num_buckets, right_reduced#, final_deltas
+    else:
+        new_values = bucket_representative - deltas_in_target_bitwidth
+        if (verbose):print "else branch"
 
-#        assert np.any(np.greater_equal(m_for_common_exp, 1)) == False
-        return
 
-    new_values = bucket_representative - deltas_in_target_bitwidth
-
-    print num_buckets, new_values, m_for_common_exp
+    if (verbose):print num_buckets, new_values, m_for_common_exp
     return num_buckets, new_values, []
 
 
@@ -201,7 +207,7 @@ def split_to_buckets(n, matrix, target_bitwidth = 16, tol = 1e-8, bucket_size = 
 
     # buckets: list of lists of matrix entries in reduced precision,
     # each sublist represent a bucket
-    print "orig", original_values, "----"
+    if (verbose):print "orig", original_values, "----"
 
     new_values = np.zeros(matrix.nnz)
     position = 0
@@ -209,17 +215,18 @@ def split_to_buckets(n, matrix, target_bitwidth = 16, tol = 1e-8, bucket_size = 
         # further recursively split them into buckets, if necessary.
         num_buckets, bucket, droplist = bucketize(v, fraction_bits, tol, split_buckets)
 
-        print type(bucket), len(bucket), split_idx[i], split_idx[i+1]
+        if (verbose):print type(bucket), len(bucket), split_idx[i], split_idx[i+1]
 
         new_values[split_idx[i]:split_idx[i+1]] = bucket
-        print "i = ", i, num_buckets, bucket, droplist, new_values
+        if (verbose):print "i = ", i, num_buckets, bucket, droplist, new_values
 
     # error estimate
     total_error = np.sum(np.abs(matrix.data - new_values))
     # updated matrix
     target_matrix = csr_matrix( (new_values, matrix.indices, matrix.indptr), matrix.shape )
 
-    print matrix.data, new_values, matrix.data-new_values
+    if (verbose):
+        print matrix.data, new_values, matrix.data-new_values
 
     return target_matrix, total_error, num_buckets, droplist
 
