@@ -7,6 +7,7 @@ import collections
 import math
 from math import ceil
 
+bits_per_double_data = 64
 bytes_per_double_data = 8
 bytes_per_metadata = 4
 
@@ -39,6 +40,23 @@ def csr(matrix, mantissa_bitwidth = 52, index_bitwidth = 32):
             (nnz * bits_per_custom_data)/8.0,
             "CSR: {:2d} bit data and ".format(bits_per_custom_data) +
             str(index_bitwidth) + " bit index")
+
+
+def csr_buckets(n, nnz, num_buckets, fixed_point_bitwidth = 16, index_bitwidth = 32):
+    '''
+       Compute storage size for CSR matrix with bucket-based mixed precision
+       IEEE 745 doubles + fixed_point correction terms of custom bitwidth
+    '''
+    # each bucket has one IEEE 745 double + custom bitwidth corrections
+    # (for each entry, nnz in total)
+    bits_per_custom_data = num_buckets*bits_per_double_data + nnz*fixed_point_bitwidth
+    metadata_bitsize = (n + nnz) * index_bitwidth
+
+    return (metadata_bitsize/8.0,
+            (bits_per_custom_data)/8.0,
+            "CSR: bucketing with {:2d} correction terms and ".format(fixed_point_bitwidth) +
+            str(index_bitwidth) + " bit index")
+
 
 
 

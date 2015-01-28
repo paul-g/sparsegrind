@@ -150,15 +150,14 @@ def compression_analysis_precision(matrix, name, tolerance):
     results.append(matrix.nnz)
     results.append(len(matrix.indptr))
 
+    n = len(matrix.indptr)
+
     # First find reference CSR
     csr = storage.csr(matrix)
     csr_values = csr[1]
     csr_total = csr[0] + csr[1]
     norm_orig     = precision.matrix_norms(matrix)
     status, orig_iterations, sol_orig = precision.solve_cg(matrix, tolerance)
-
-    n = len(matrix.indptr)
-
     if status != 0: print "This matrix, as given, did not ever converge"; return
 
     # Total # of flops over num iterations
@@ -232,7 +231,80 @@ def analyse_bucketing(matrix, name, tolerance):
 
     n = len(matrix.indptr)
 
-    precision.split_to_buckets(n, matrix, target_bitwidth=16, tol=1e-8, bucket_size=2, integer_bits = 4)
+    # First find reference CSR
+    csr = storage.csr(matrix)
+    csr_values = csr[1]
+    csr_total = csr[0] + csr[1]
+    norm_orig     = precision.matrix_norms(matrix)
+    orig_iterations, sol_orig = (1,2)
+#    status, orig_iterations, sol_orig = precision.solve_cg(matrix, tolerance)
+#    if status != 0: print "This matrix, as given, did not ever converge"; return
+
+    # Total # of flops over num iterations
+    orig_flop_count = matrix.nnz * orig_iterations
+    # Total traffic (bytes): fetching matrix, vectors x and y and a diagonal
+    # preconditioner @ each iteration.
+    orig_traffic = (csr_total + 3*n) * orig_iterations
+
+    np.set_printoptions(precision=2)
+    print name,"\n"
+    for target_bitwidth in [16,]: #[8,16,20,24,32]:
+     for bucket_size in [3]: # 8,16,20,24,32,36,42,48]:
+      print "| fixed point {:2d} bits:".format(target_bitwidth),
+
+      reduced_matrix, error, num_buckets, droplist = precision.split_to_buckets(n,
+                        matrix, target_bitwidth, tol=1e-8, bucket_size = bucket_size)
+
+      reduced_matrix2, error2 = precision.reduce_elementwise(n, matrix, target_bitwidth)
+      mat_l2error       = precision.l2_error(reduced_matrix.data, reduced_matrix2.data)
+
+      print "dropped {:d}, rep error {:f}, diff {:f}".format(len(droplist), error, mat_l2error),
+
+      # analyse precision loss
+      status, iterations, sol_reduced = precision.solve_cg(reduced_matrix, tolerance)
+      # ignore this precision if not even converged at all
+      if status != 0: print "did not converge"; continue
+      # did we ever converge to a sensible solution?
+      l2error       = precision.l2_error(sol_orig, sol_reduced)
+      # ignore this precision if converged to something completely different
+      # let's accept 10 times worse accuracy for reduced precision
+      if l2error > 10*tolerance: print "converged to a wrong solution"; continue
+
+      # this should stand for poor man estimation of reduction consequences,
+      # as _substitute_ to actually solving matrix problem. Matrix norms should
+      # be indicative to convergence rates.
+      norm_reduced  = precision.matrix_norms(reduced_matrix)
+
+      additional_iterations = iterations - orig_iterations
+
+      print "iterations {:2d} {:2d} {:2d}, l1 norm {:2f} {:2f} {:2f} ".format(
+                                       orig_iterations, iterations, additional_iterations,
+                                       norm_orig[0], norm_reduced[0],
+                                       norm_orig[0]-norm_reduced[0],)
+
+      csr_custom = storage.csr(matrix, mantissa_bitwidth=target_bitwidth, index_bitwidth=np.array([16,32]))
+      reduced_total_storage = csr_custom[0] + csr_custom[1]
+      value_compression_rate = csr_values/csr_custom[1]
+      total_compression_rate = csr_total/reduced_total_storage
+
+      # OK, we reduced precision and got more iterations. Did we win?
+      reduced_flop_count = matrix.nnz * iterations
+      # Assuming only matrix precision is subject to reduction.
+      reduced_traffic = (reduced_total_storage + 3*n) * iterations
+
+      flops_improvement = (orig_flop_count).astype(np.float64)/reduced_flop_count
+      traffic_improvement = (orig_traffic).astype(np.float64)/reduced_traffic
+
+      print "  compression: values {:2f}, total ".format(value_compression_rate),
+      for c in total_compression_rate:
+        print "{:2f}".format(c),
+      print "| outcome: flops ratio {:2f}, traffic ratio".format(flops_improvement),
+      for t in traffic_improvement:
+        print "{:2f}".format(t),
+      print
+
+    print
+
 
 def plot_matrices(list_of_matrices):
     """Plots the given list of sparse matrices using plt.spy()"""

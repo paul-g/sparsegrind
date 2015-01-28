@@ -30,6 +30,7 @@ def trim_ieee_mantissa(data, target_bitwidth, split_rep=None):
 
     Returns:
         numpy.ndarray: same shape as before, each entry of reduced precision
+        split_rep : optional, frexp representation of trimmed data
     """
 
     # all binary 1 for the leading bitwidth positions in IEEE double float mantissa
@@ -47,12 +48,14 @@ def trim_ieee_mantissa(data, target_bitwidth, split_rep=None):
     # construct representation of matrix values in IEEE float with given mantissa bitwidth
     value_in_target_bitwidth = np.ldexp(m_in_target_bitwidth, exp)
 
-    split_rep.append((m_in_target_bitwidth, exp))
+    # optionally return m*2^exp representation of output
+    if split_rep is not None:
+        split_rep.append((m_in_target_bitwidth, exp))
 
-    print "------trim_ieee_mantissa----------------------"
-    print (m,exp), integer_m_rep,
-    print pos_integer_m_rep, neg_integer_m_rep, pos_m_in_target_bitwidth, neg_m_in_target_bitwidth
-    print "mantissas=", m_in_target_bitwidth, value_in_target_bitwidth
+#    print "------trim_ieee_mantissa----------------------"
+#    print (m,exp), integer_m_rep,
+#    print pos_integer_m_rep, neg_integer_m_rep, pos_m_in_target_bitwidth, neg_m_in_target_bitwidth
+#    print "mantissas=", m_in_target_bitwidth, value_in_target_bitwidth
 
     return value_in_target_bitwidth
 
@@ -95,33 +98,89 @@ def reduce_elementwise(n, matrix, target_bitwidth):
     return target_matrix, total_error
 
 
-def split_to_buckets(n, matrix, target_bitwidth = 16, tol = 1e-8, bucket_size = None, integer_bits = 2):
+def bucketize(data, bitwidth, tolerance, split_buckets):
+    """
+        A recursive helper function which aims to build a (list of) buckets out
+        of input data. For the structure of bucket elements see split_to_buckets().
+
+        It either picks a single bucket representative so that all other bucket
+        members are all smaller and fit number representation, or splits data on
+        violating member and recursively applies itself on both lists.
+    """
+
+    bucket_representative = (np.max(data))
+    # delta encoding
+    deltas = bucket_representative - data
+    # reduce precision of deltas
+    deltas_trimmed_split = []
+    deltas_in_target_bitwidth = trim_ieee_mantissa(deltas, bitwidth, deltas_trimmed_split)
+    # get deltas in the form m*2^exp, where 0.5 <= abs(m) < 1.
+    m,exp = deltas_trimmed_split[0]
+    # bring them to the common exponent with bucket representative
+    rm, rexp = np.frexp(bucket_representative)
+    exponent_diff = exp - rexp
+    # in the actual encoding, only this part is to be stored
+    m_for_common_exp = m * 2.0**exponent_diff
+
+    print "---------------------------"
+    print data, bucket_representative, deltas
+    print (m,exp), (rm, rexp), exponent_diff
+    print "to be stored:", m_for_common_exp
+    print deltas_in_target_bitwidth
+
+
+    num_buckets = 1
+    # does any correction term require non-zero integer part?
+    if (np.any(np.greater_equal(m_for_common_exp, 1))):
+
+        print "bucket entry requires an integer part: ", m_for_common_exp
+        print "cannot fit deltas to +/-{:1d}.{:2d} bit form\n".format(0, bitwidth)
+
+        # split data into 2 parts starting from violating member
+        branching_point = np.argmax(m_for_common_exp >= 1)
+        left, right = np.split(data,[branching_point])
+        # re-run bucketize on second part (first part is already fine)
+        num, bucket, droplist = bucketize(right, bitwidth, tolerance, split_buckets)
+
+        print branching_point, left, right, num, bucket
+
+#        assert np.any(np.greater_equal(m_for_common_exp, 1)) == False
+        return
+
+    new_values = bucket_representative - deltas_in_target_bitwidth
+
+    print num_buckets, new_values, m_for_common_exp
+    return num_buckets, new_values, []
+
+
+def split_to_buckets(n, matrix, target_bitwidth = 16, tol = 1e-8, bucket_size = 1024, split_buckets = False):
     """
     Here we delta-encode matrix entries by representing them in a form
 
-        bucket_representative_64bit + fixed_point_mantissa_correction*2^exp,
+        bucket_representative_64bit - 0.fixed_point_correction*2^exp,
 
-    where bucket_representative_64bit is IEEE 745 floating point number and
-    mantissa correction term is a signed fixed point number of target_bitwidth
-    of the form
+    where bucket_representative_64bit is the average number within the bucket
+    stored as IEEE 745 double. The mantissa correction term is a fixed point
+    number, which shares exponent with bucket representative and its fractional
+    part of mantissa has target_bitwidth.
 
-       sign bit | integer bits . fractional bits
+    0.fixed_point_fractional_correction*2^exp,
 
-    which shares exponent with bucket representative. If bucket_size is None, we
-    start a new bucket when
+    We assume spacially close matrix entries are close numerically. The bucket
+    representative is chosen as maximum in the bucket, so that all fixed point
+    correction terms are always below zero and always subtracted. This avoids
+    necessity of explicitly representing sign, integer part and leading zero,
+    thus maximizing the precision of a correction term. Drawback of this choice
+    for bucket representative: one correction term is always zero. If
+    reorder=True we assume the ordering which eliminates explicitly stored zero.
+
+    In the case bucket representative falls below the threshold, we drop whole
+    bucket and return the number of entries to purge.
+
+    If bucket_size is None, we start a new bucket when
      - bucket representative - new member candidate > tol
        (representational error of a new member is unacceptable)
-     - total running error within the bucket is above threshold.
-
-    We assume spacially close matrix entries are close to each other
-    numerically. The bucket representative is chosen to minimise the common
-    representational error (e.g. average of entries). For the variable bucket
-    size we use given tolerance for both criteria above.
-
-    We explicitly form matrix values in this form and then convert them back to
-    IEEE doubles to check for convergence properties. In the case bucket
-    representative falls below the threshold, we drop whole bucket and return
-    the number of entries to purge.
+     - total running error within the bucket is > tol.
 
     Returns:
         scipy.sparse.csr_matrix: CSR matrix of same shape and sparsity but reduced precision values
@@ -129,66 +188,41 @@ def split_to_buckets(n, matrix, target_bitwidth = 16, tol = 1e-8, bucket_size = 
         int: number of entries in given matrix to be dropped
     """
 
-    # do not support variable bucket size yet
-    assert bucket_size is not None
+    #print matrix.nnz, matrix.data, target_bitwidth
 
-    # we do allow for sign and integer bits in our fixed point deltas.
-    mantissa_bits = target_bitwidth - 1 - integer_bits
+    # one sign bit, implicit leading zero, point, then fraction
+    # no integer component: always implicitly 0.
+    fraction_bits = target_bitwidth - 1
 
-    print matrix.nnz, matrix.data, target_bitwidth, integer_bits, mantissa_bits
+    # split matrix.nnz into (relatively) large chunks
+    split_idx = np.arange(bucket_size, matrix.nnz, bucket_size)
+    original_values = np.split(matrix.data, split_idx)
+    split_idx = np.concatenate(([0],split_idx,[matrix.nnz]))
 
-    target_values = []
-    buckets = []
+    # buckets: list of lists of matrix entries in reduced precision,
+    # each sublist represent a bucket
+    print "orig", original_values, "----"
+
+    new_values = np.zeros(matrix.nnz)
     position = 0
-    total_error = 0
-    print "---------------------------"
-    while (position < matrix.nnz):
+    for i,v in zip(range(len(original_values)),original_values):
+        # further recursively split them into buckets, if necessary.
+        num_buckets, bucket, droplist = bucketize(v, fraction_bits, tol, split_buckets)
 
-        # take matrix entries to form the bucket
-        original_values = matrix.data[position:(position+bucket_size)].copy()
+        print type(bucket), len(bucket), split_idx[i], split_idx[i+1]
 
-        # delta encoding
-        # TODO: average might not be the best, e.g. avg(250.5,-280)=-14.75
-        bucket_representative = np.average(original_values)
-        deltas = bucket_representative - original_values
-        # reduce precision of deltas
-        deltas_trimmed_split = []
-        deltas_in_target_bitwidth = trim_ieee_mantissa(deltas, mantissa_bits, deltas_trimmed_split)
+        new_values[split_idx[i]:split_idx[i+1]] = bucket
+        print "i = ", i, num_buckets, bucket, droplist, new_values
 
-        # get deltas in the form m*2^exp, where 0.5 <= abs(m) < 1.
-        m,exp = deltas_trimmed_split[0]
-        # bring them to the common exponent with bucket representative
-        rm, rexp = np.frexp(bucket_representative)
-        exponent_diff = exp - rexp
-        m_for_common_exp = m * 2.0**exponent_diff
-        # check that integer components do not exceed integer_bits,
-        # being brought to fixed point representation.
-        if (np.any(np.greater(m_for_common_exp, 2**integer_bits-1))):
-            print "cannot fit deltas to +/-{:1d}.{:2d} bit form with bucket_size={:d}\n".format(
-                                                       integer_bits, mantissa_bits,bucket_size)
-            return
+    # error estimate
+    total_error = np.sum(np.abs(matrix.data - new_values))
+    # updated matrix
+    target_matrix = csr_matrix( (new_values, matrix.indices, matrix.indptr), matrix.shape )
 
-        # put data in a bucket
-        buckets.append([bucket_representative, deltas_in_target_bitwidth])
-        position += bucket_size
+    print matrix.data, new_values, matrix.data-new_values
 
-        # error estimate
-        new_values = bucket_representative + deltas_in_target_bitwidth
-        target_values.append(new_values)
-        total_error += np.sum(np.abs(original_values - new_values))
+    return target_matrix, total_error, num_buckets, droplist
 
-        print "---------------------------"
-        print deltas_trimmed_split
-
-        print position, original_values, bucket_representative, deltas
-        print (m,exp), (rm, rexp), exponent_diff
-        print deltas_in_target_bitwidth
-
-    target_matrix = csr_matrix( (target_values, matrix.indices, matrix.indptr), matrix.shape )
-
-    #print "vector of errors: ", np.abs(matrix.data-value_in_target_bitwidth)
-
-    return target_matrix, total_error
 
 
 def matrix_norms(matrix):
